@@ -1,0 +1,344 @@
+---
+title: "Final Project"
+author: 'Khoa (Callie) Nguyen - SID: 3035091554'
+output:
+  bookdown::pdf_document2:
+    toc: no
+    fig_caption: yes        
+    includes:  
+      in_header: my_header.tex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r include=FALSE,results='hide'}
+library(astsa)
+library(forecast)
+library(knitr)
+library(ggplot2)
+library(gridExtra)
+library(grid)
+```
+
+```{r}
+sarima_LB = function (xdata, p, d, q, P = 0, D = 0, Q = 0, S = -1, details = TRUE, 
+                         xreg = NULL, Model = TRUE, fixed = NULL, tol = sqrt(.Machine$double.eps), 
+                         no.constant = FALSE, max.lag = -1) 
+{
+  layout = graphics::layout
+  par = graphics::par
+  plot = graphics::plot
+  grid = graphics::grid
+  title = graphics::title
+  polygon = graphics::polygon
+  abline = graphics::abline
+  lines = graphics::lines
+  frequency = stats::frequency
+  coef = stats::coef
+  dnorm = stats::dnorm
+  ppoints = stats::ppoints
+  qnorm = stats::qnorm
+  time = stats::time
+  na.pass = stats::na.pass
+  trans = ifelse(is.null(fixed), TRUE, FALSE)
+  trc = ifelse(details, 1, 0)
+  n = length(xdata)
+  if (is.null(xreg)) {
+    constant = 1:n
+    xmean = rep(1, n)
+    if (no.constant == TRUE) 
+      xmean = NULL
+    if (d == 0 & D == 0) {
+      fitit = stats::arima(xdata, order = c(p, d, q), seasonal = list(order = c(P, 
+                                                                                D, Q), period = S), xreg = xmean, include.mean = FALSE, 
+                           fixed = fixed, trans = trans, optim.control = list(trace = trc, 
+                                                                              REPORT = 1, reltol = tol))
+    }
+    else if (xor(d == 1, D == 1) & no.constant == FALSE) {
+      fitit = stats::arima(xdata, order = c(p, d, q), seasonal = list(order = c(P, 
+                                                                                D, Q), period = S), xreg = constant, fixed = fixed, 
+                           trans = trans, optim.control = list(trace = trc, 
+                                                               REPORT = 1, reltol = tol))
+    }
+    else fitit = stats::arima(xdata, order = c(p, d, q), 
+                              seasonal = list(order = c(P, D, Q), period = S), 
+                              include.mean = !no.constant, fixed = fixed, trans = trans, 
+                              optim.control = list(trace = trc, REPORT = 1, reltol = tol))
+  }
+  if (!is.null(xreg)) {
+    fitit = stats::arima(xdata, order = c(p, d, q), seasonal = list(order = c(P, 
+                                                                              D, Q), period = S), xreg = xreg, fixed = fixed, trans = trans, 
+                         optim.control = list(trace = trc, REPORT = 1, reltol = tol))
+  }
+  if (details) {
+    old.par <- par(no.readonly = TRUE)
+    
+    # ## Standardized residuals
+
+    rs <- fitit$residuals
+    
+    nlag <- ifelse(S < 7, 20, 3 * S)
+    ppq <- p + q + P + Q - sum(!is.na(fixed))
+    if (nlag < ppq + 8) {
+      nlag = ppq + 8
+    }
+    pval <- numeric(nlag)
+    for (i in (ppq + 1):nlag) {
+      u <- stats::Box.test(rs, i, type = "Ljung-Box")$statistic
+      pval[i] <- stats::pchisq(u, i - ppq, lower.tail = FALSE)
+    }
+    plot((ppq + 1):nlag, pval[(ppq + 1):nlag], xlab = "LAG (H)", 
+         ylab = "p value", ylim = c(-0.1, 1))
+    abline(h = 0.05, lty = 2, col = "blue")
+    on.exit(par(old.par))
+  }
+  if (is.null(fixed)) {
+    coefs = fitit$coef
+  }
+  else {
+    coefs = fitit$coef[is.na(fixed)]
+  }
+  dfree = fitit$nobs - length(coefs)
+  t.value = coefs/sqrt(diag(fitit$var.coef))
+  p.two = stats::pf(t.value^2, df1 = 1, df2 = dfree, lower.tail = FALSE)
+  ttable = cbind(Estimate = coefs, SE = sqrt(diag(fitit$var.coef)), 
+                 t.value, p.value = p.two)
+  ttable = round(ttable, 4)
+  k = length(coefs)
+  n = n - (d + D)
+  BIC = stats::BIC(fitit)/n
+  AIC = stats::AIC(fitit)/n
+  AICc = (n * AIC + ((2 * k^2 + 2 * k)/(n - k - 1)))/n
+  list(fit = fitit, degrees_of_freedom = dfree, ttable = ttable, 
+       AIC = AIC, AICc = AICc, BIC = BIC)
+}
+```
+
+# Executive Summary
+
+The Bearcounty's yearly number of acres burned started off high in the 1930s, and after 1947 reduced overtime until the 1990s, then started to pick up again in the early 2000s. The governors would like to use this data to forecast the lands burnt in the upcoming decade so that they can allocate their resources effectively. There is no clear seasonality shown in the data, so we were unable to detect any possible patterns in the number of affected area. According to our Second Order Differencing model with ARMA(2, 2) noise, the number of acres burnt by the wildfires in the next 2 years will likely increase before going down again. 
+
+# Exploratory Data Analysis
+
+```{r,  echo=FALSE}
+setwd('~/Desktop/153/Project/')
+fires = read.csv('projectdata_fires.csv')
+year = fires$year
+acres = fires$acres
+```
+
+The burnt lands are generally decreasing over the decades, as seen below on the left of Figure \@ref(fig:EDA). No seasonality is observed. An unusual dip happened during 1944 and 1945, but then the numbers rocketed back in 1946 and 1947. After 1947, the acres decreased exponentially.  Heteroscedasticity is present in these residuals, hence I can correct it with an appropriate transformation.The mean and the variance of acres per decade appears to decrease over time. This indicates that there is a quadratic dependency of the variance on the mean, thus I attempt to correct this with the log() transformation. The aftermath data looks somewhat more homoscedastic, as seen in the second graph. From now on, I will be using the transformed acres data instead of the data to avoid heteroscedasticity.
+
+```{r EDA, fig.cap="Number of acres of land burnt over the years", out.width = "80%", fig.align = 'center', fig.width = 7.5,fig.height = 4}
+
+par(mfrow=c(1,2))
+par(family = 'serif')
+
+plot.fires = function(timeseries,main="",ylab='acres',x= fires$X,type='l',col=1, 
+                      ylim = c(min(timeseries), max(timeseries))){
+   plot(x,timeseries
+     ,type = type
+     ,xlab = "Year"
+     ,col = col
+     ,ylab = ylab
+     ,main = main
+     ,axes = F,
+     ylim = ylim
+     )
+box()
+axis(2)
+axis(1,at = c(1,11,21,31,41, 51, 61, 71), labels = seq(1931, 2009, by=10))
+}
+plot.fires(timeseries = acres, ylab = "Acres", main="Acres Burnt History")
+
+logacres = log(acres)
+plot.ts(logacres, ylab = "Log of Acres", main = "Log of Acres Burnt History")
+```
+
+<!-- The Periodogram in Figure \@ref(fig:peri) confirms that there is no apparent seasonality in this data. Moreover, some leakage is also observed around the highest peak. At the same time, the ACF plot shows a sharp decreasing trend without any seasonality. -->
+
+```{r peri, fig.cap= "Pediogram and ACF plots of burnt Acres", out.width = "80%", fig.show="asis", fig.align = 'center',  fig.width = 7.5,fig.height = 4}
+
+# 
+# par(mfrow=c(1,2))
+# par(family = 'serif')
+# 
+# pgram = function(x){
+#   m = floor(length(x)/2)
+#   pgram = abs(fft(x)[2:(m+1)])^2/length(x)
+#   plot(pgram, type = "h", 
+#        main = "Periodogram of Acres", xlab = "Frequency", ylab = "Periodogram")
+#   abline(h=0)
+#   # return(pgram)
+# }
+# 
+# pgram(acres)
+# plot(acf(acres, plot=FALSE), main = "ACF of Acres")
+
+```
+# Models Considered
+
+To model the signal in this data, I use 2 models: Exponential Smoothing (weighted) and Differencing.The remaining stationary noise will be addressed using ARMA models.
+
+## Smoothing
+
+First, a 1-sided exponential smoothing model with smoothing constant $\alpha = .2$ is considered since choosing $\alpha = .2$ gives more weight to the earlier data points by slowing down the dampening effect onto them. I will start modeling from year 1951, which means the first 20 data points are used for this model. Figure \@ref(fig:signal1) presents the fit as well as the residuals. The residuals don't look as stationary just yet; there seems to be some trend left untouched: while the mean relatively centers around 0, the variance gets bigger over time.
+
+```{r signal1, fig.cap='Smoothing "signal model" and residuals. The left panel shows this model’s fitted values in red, plotted atop the acres data in black. The right panel shows the residuals of this model.',  out.width = "78%", fig.align = 'center', fig.show="asis", fig.width = 8.5,fig.height = 4}
+par(mfrow = c(1,2))
+
+#Exponential
+a = .2
+weights =  (a^(1:20))
+weights = weights/sum(weights)
+weights = c(0,weights)
+
+fires$smoothmodel = filter(logacres,sides = 1,filter=weights)
+
+par(family = 'serif')
+plot.fires(logacres, x = fires$X, ylab = "Acres", main = "Smoothing model")
+lines(fires$smoothmodel,col=2,lwd=2)
+
+s1.residuals = logacres - fires$smoothmodel
+plot.ts(s1.residuals, main="Smoothing Residuals", 
+        ylab = "Residuals", ylim=c(-.8, .8))
+```
+### Exponential smoothing with AR(1)
+
+```{r acfs11, fig.cap='Autocorrelation function (ACF) and partial autocorrelation function (PACF) values for the one-sided exponential smoothing model',  out.width = "65%", fig.align = 'center', fig.show="asis", fig.width = 7.5,fig.height = 4 }
+par(family = 'serif')
+
+temp = acf2(fires$smoothmodel, max.lag = 50, main = "ACF and PACF plots of Smoothing model")
+```
+The ACF plot in Figure \@ref(fig:acfs11) oscillates and tails off gradually, while the PACF plot roughly cuts off after lag 1, with one exception of a slightly large magnitude value occuring at lag 11. However, this value is initially determined to be insignificant. Additionally, there are more significant lags in the ACF than PACF. These observations lead to proposing using AR(1) as a start. All the P-values of the Ljung-Box statistics for this noise in Figure \@ref(fig:s11) are above the significance level, which shows that AR(1) is potentially white noise and good fit.
+
+```{r s11, fig.cap= "P-values for Ljung-Box statistics for AR(1)", out.width = "70%", fig.show="asis", fig.align = 'center', results = 'hide', fig.height = 3}
+# par(mfrow = c(2,1))
+par(family = 'serif')
+
+s1.1 = sarima_LB(fires$smoothmodel,p=1,d=0,q=0,S=0,P=0,max.lag = 50)
+title(main = "P-values for Ljung-Box statistics")
+```
+### Exponential smoothing with AR(2)
+
+On the other hand, the function auto.arima(), with no differencing option specified, suggests AR(2) This appears as a possibility if we take into account the large magnitude value at lag 11 of the PACF plot in Figure \@ref(fig:acfs11). From the Ljung box in Figure \@ref(fig:s12), AR(2) performs only slightly worse than AR(1) in terms of P-values, but it can still reasonably be considered a good fit as most values are above the significance level.
+
+```{r results='hide'}
+auto.arima(fires$smoothmodel, max.d=0)
+```
+
+```{r s12, results='hide', fig.cap='Diagnostic plots for AR(2).', out.width = "70%", fig.align = 'center', result = 'hide', fig.height = 3}
+s1.2 = sarima_LB(fires$smoothmodel,p=2,d=0,q=0)
+title(main = "P-values for Ljung-Box statistics")
+```
+## Differencing
+
+Secondly, we’ll pursue stationarity with differencing. There is a quadratic trend observed in the data, so Second Order Differencing is deemed appropriate in this case. Below, Figure \@ref(fig:signal2) gives the fitted values of the differencing model and the time series of the differences, which appears almost stationary, with the exception of a trend in the plot where the log of acres gets smaller around 1970s and increases again from 1980.
+
+```{r signal2, fig.cap='Differencing "signal model" fit and residuals', out.width = "80%", fig.align = 'center', fig.show="asis", fig.width = 7.5,fig.height = 4}
+
+par(mfrow = c(1,2))
+
+decd_diff = diff(diff(logacres))
+fires$diffmodel = NA
+
+for(i in 2:nrow(fires)){
+    fires$diffmodel[i] = mean(decd_diff) + logacres[i-1]
+}
+#
+par(family = 'serif')
+plot.fires(logacres, x = fires$X, ylab = "Acres", main = "Differencing Fitted Values")
+lines(fires$X, fires$diffmodel, col = 'hotpink', lw = 2)
+
+#
+plot.fires(decd_diff
+           ,main = expression(paste(Delta,"logAcres"[t]))
+           ,x = fires$X[(nrow(fires)-length(decd_diff)+1):nrow(fires)],
+           ylab = "Acres", ylim = c(-1, 1))
+```
+### Differencing with MA(2)
+
+```{r acfs21, fig.cap='Autocorrelation function (ACF) and partial autocorrelation function (PACF) values for the differencing model.', out.width = "65%", fig.align = 'center', fig.show="asis", fig.width = 7.5,fig.height = 4}
+
+d2 = acf2(decd_diff, max.lag = 50, main = "ACF and PACF plots of Differencing model")
+```
+The sample ACF and PACF for these differences are shown in Figure \@ref(fig:acfs21). I thus will use MA(2) since lag 1 has the largest magnitude ACF value, following by lag 6 whose magnitude slightly goes beyond the blue boundaries in the ACF plot, all while PACF values are decreasing. This matches the behavior of an MA process. Judging by the Ljung-Box in Figure \@ref(fig:s21), the first few lags of MA(2) do not seem to perform as well as the rest since their P-values stay close to the significance level. However, overall, MA(2) is still considered a good fit.
+
+```{r s21, results='hide', fig.cap='Diagnostic plots for ARMA(0, 2, 2).', out.width = "70%", fig.align = 'center', fig.height = 3}
+s2.1 = sarima_LB(decd_diff,p=0,d=0,q=2)
+```
+### Differencing with ARMA(2, 2)
+
+As with the previous signal model’s second ARMA specification, the second noise model is picked out to be ARMA(2, 2), ie. q=2 and p=2, using the auto.arima() function. This choice could be due to some visible cut-off in the PACF plot in Figure \@ref(fig:acfs21). This time, the Ljung-Box (Figure \@ref(fig:s22)) shows that this model behaves like white noise and is a much better fit than the previous one, as the P-values are higher above the significance line.
+
+```{r results='hide'}
+auto.arima(decd_diff)
+```
+
+```{r s22, results='hide', fig.cap='Diagnostic plots for ARMA(0, 1, 1).', out.width = "70%", fig.align = 'center', fig.height = 3}
+
+s2.2 = sarima_LB(decd_diff,p=2,d=0,q=2)
+```
+
+# Model Comparison and Selection
+
+These four model options are compared using cross validation. The testing sets use the data from the last 62 years, from 1946 to 2008, thus 62 forecast data points. The dataset is split so that the training sets consist of all data that occur before the appropriate testing set. The models’ forecasting performances will be compared through root-mean-square prediction error (RMSPE), and the model with the lowest RMSPE will be deemed as the best model for predicting the number of burnt acres in the next 10 years.
+
+Table 1 shows that the Second Order Differencing model with ARMA(2, 2) has the lowest cross-validated forecast error, thus it is the chosen as our forecasting model.
+
+
+```{r include="false"}
+sse = c(model11 = 0, model12 = 0, model21 = 0, model22 = 0)
+ts = ts(logacres, start = 1931, end = 2008)
+
+for (i in 1:10) {
+  train = window(ts,start=1946, end=1997+i)
+  test = window(ts, start=1998+i, end=1998+2*i)
+
+  forecast1 = sarima.for(train, n.ahead=10, p=1,d=0,q=0)$pred
+  forecast2 = sarima.for(train, n.ahead=10, p=2,d=0,q=0)$pred
+  forecast3 = sarima.for(train, n.ahead=10, p=0,d=2,q=2)$pred
+  forecast4 = sarima.for(train, n.ahead=10, p=2,d=0,q=2)$pred
+
+  #SSE
+  sse[1] = sse[1] + sum((forecast1 - test)^2)
+  sse[2] = sse[2] + sum((forecast2 - test)^2)
+  sse[3] = sse[3] + sum((forecast3 - test)^2)
+  sse[4] = sse[4] + sum((forecast4 - test)^2)
+}
+```
+```{r ssetable}
+N = nrow(fires)
+rmse = matrix(sqrt(sse/N), nrow=4,ncol = 1)
+colnames(rmse) = "RMSPE"
+rownames(rmse) = c(
+        "Smoothing Model + AR(1)",
+        "Smoothing Model + AR(1, 1)",
+        "Second Order Differencing + ARMA(0, 2)",
+        "Second Order Differencing + ARMA(2, 2)"
+        )
+knitr::kable(rmse,caption = "Cross-validated out-of-sample sum of squared error for the four models under consideration.")
+```
+
+# Results
+
+To forecast the acres burnts in the next 10 years, a differencing model of time will be used. $X_t$ is a stationary process defined by ARMA(2,2), where $W_t$ is white noise with variance $\sigma^2_W$, and $\phi$, $\theta$ are coefficients.
+
+$$\bigtriangledown ^{2} X_t = \phi \bigtriangledown ^{2} X_{t-1} + \phi \bigtriangledown ^{2} X_{t-2} + W_t + \theta W_{t-1}$$
+
+## Prediction
+
+Figure \@ref(fig:forecasts) shows the forecast values of acres for the next 10 years. The model predicts that more lands will burn in the upcoming 2 years before slowing down again. This is good evidence that the county governors and the fire fighters should allocate their resources early on in order to slow down the burnt lands, as it will be beneficial in the long run when the wildfires die down.
+
+```{r forecasts, fig.cap="Forecasts of number of arces burnt in the fire in the next 10 years. The black points are the recent historical acres data. The red points are the forecasts for the next ten years. The dark/light grey bands are the one/two standard error bands, representing 68\\%/95\\% prediction intervals, respectively.", out.width = "70%", fig.align = 'center', fig.width = 8,fig.height = 4}
+
+for1 = sarima.for(acres, n.ahead=10, p=2,d=2,q=2)
+```
+
+
+```{r}
+write.table(x = for1$pred,file = "fires_3035091554.csv", sep=",",row.names=FALSE, col.names=FALSE)
+```
+
